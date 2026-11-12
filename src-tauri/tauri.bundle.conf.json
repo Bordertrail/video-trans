@@ -1,0 +1,10 @@
+{
+  "bundle": {
+    "active": true,
+    "externalBin": ["binaries/ffmpeg", "binaries/ffprobe"],
+    "resources": {
+      "resources/NotoSansCJKsc-Regular.otf": "NotoSansCJKsc-Regular.otf",
+      "resources/licenses/": "licenses/"
+    }
+  }
+}

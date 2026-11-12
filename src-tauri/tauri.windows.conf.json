@@ -1,0 +1,17 @@
+{
+  "bundle": {
+    "active": true,
+    "publisher": "Bordertrail",
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "externalBin": ["binaries/ffmpeg", "binaries/ffprobe"],
+    "resources": {
+      "resources/NotoSansCJKsc-Regular.otf": "NotoSansCJKsc-Regular.otf",
+      "resources/windows-licenses/": "licenses/"
+    },
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true },
+      "nsis": { "installMode": "currentUser", "languages": ["SimpChinese"] }
+    }
+  }
+}

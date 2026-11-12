@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "视频转码",
+  "version": "0.2.4",
+  "identifier": "com.chasingbird.videotrans",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      { "label": "main", "title": "视频转码", "width": 1024, "height": 780, "minWidth": 640, "minHeight": 620 }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' blob:; media-src http://127.0.0.1:*; style-src 'self'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": ["app"],
+    "icon": ["icons/icon.png", "icons/icon.icns"],
+    "macOS": { "minimumSystemVersion": "13.0" }
+  }
+}

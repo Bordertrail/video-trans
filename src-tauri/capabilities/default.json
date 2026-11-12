@@ -1,0 +1,6 @@
+{
+  "identifier": "main-window",
+  "description": "Allow the main window to select local inputs and destinations",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save"]
+}
