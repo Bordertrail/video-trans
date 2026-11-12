@@ -1,0 +1,69 @@
+name: Publish installers
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    if: github.ref_type == 'tag'
+    uses: ./.github/workflows/windows.yml
+
+  macos:
+    if: github.ref_type == 'tag'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:media
+      - run: npm run build:macos
+        env:
+          APPLE_SIGNING_IDENTITY: '-'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: video-trans-macos-arm64
+          path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+      - name: Publish both installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(jq -r .version src-tauri/tauri.conf.json)"
+          test "$GITHUB_REF_NAME" = "v$version"
+          windows="video-trans-${version}-windows-x64-setup.exe"
+          macos="video-trans-${version}-macos-arm64.dmg"
+          mv "packages/video-trans-windows-x64/视频转码_${version}_x64-setup.exe" "$windows"
+          mv "packages/video-trans-macos-arm64/视频转码_${version}_aarch64.dmg" "$macos"
+          cat > release-notes.md <<'EOF'
+          - Windows 10 / 11（x64）下载 `.exe` 安装程序。系统缺少 WebView2 时，安装程序会联网补装。
+          - macOS 13 或更新版本（Apple 芯片）下载 `.dmg` 镜像。
+
+          此预发布的 Windows 安装包未做数字签名，macOS 安装包使用临时签名，未经 Apple 公证。
+          EOF
+          gh release create "$GITHUB_REF_NAME" "$windows" "$macos" \
+            --verify-tag --prerelease --title "视频转码 $version" --notes-file release-notes.md
