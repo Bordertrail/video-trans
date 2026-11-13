@@ -1,5 +1,5 @@
 use crate::{
-    media::{inspect, OutputFormat, Position, Resolution, Settings, Size, Tools, Watermark},
+    media::{inspect, Clip, OutputFormat, Position, Resolution, Settings, Size, Tools, Watermark},
     output::Destination,
     transcode::{self, Control, Event},
 };
@@ -67,6 +67,7 @@ fn size_limited_export_keeps_the_full_video() {
             format,
             resolution: Resolution::P480,
             target_bytes: Some(1_000_000),
+            clips: Vec::new(),
             watermark: Watermark::Off,
         };
         let output = directory
@@ -93,6 +94,177 @@ fn size_limited_export_keeps_the_full_video() {
         assert_eq!(result.display.height, 480);
         assert!(result.audio.is_some());
         assert!((result.duration.unwrap() - media.duration.unwrap()).abs() < 0.1);
+    }
+
+    let settings = Settings {
+        media_id: 1,
+        format: OutputFormat::Webm,
+        resolution: Resolution::P480,
+        target_bytes: Some(1_000_000),
+        clips: vec![Clip {
+            start: 2.0,
+            end: 5.0,
+        }],
+        watermark: Watermark::Text {
+            text: "Clip".into(),
+            font_size: 32,
+            color: "#ffffff".into(),
+            opacity: 80,
+            position: Position::BottomRight,
+        },
+    };
+    let output = directory.path().join("trimmed.webm");
+    let destination = Destination::prepare(&source, &output, settings.format, false).unwrap();
+    assert!(matches!(
+        transcode::export(
+            &tools,
+            &media,
+            &settings,
+            destination,
+            &Control::default(),
+            |_| {}
+        )
+        .unwrap(),
+        Event::Succeeded {
+            bytes: 1..=1_000_000,
+            ..
+        }
+    ));
+    let result = inspect(&tools, &output).unwrap();
+    assert!((result.duration.unwrap() - 3.0).abs() < 0.1);
+    assert!(result.audio.is_some());
+    let proxy = crate::playback::Proxy::new().unwrap();
+    let (sample, mime, range) =
+        transcode::compression_sample(&tools, &media, &settings, &proxy, &AtomicBool::new(false))
+            .unwrap();
+    assert_eq!((mime, range.start, range.end), ("video/webm", 2.0, 5.0));
+    for path in [sample, proxy.path()] {
+        let sample = inspect(&tools, &path).unwrap();
+        assert!((sample.duration.unwrap() - 3.0).abs() < 0.1);
+        assert!(sample.audio.is_some());
+    }
+    let mut settings = settings;
+    settings.clips.push(Clip {
+        start: 6.0,
+        end: 7.0,
+    });
+    let preview = proxy.file("preview.webm");
+    let cancel = AtomicBool::new(false);
+    transcode::preview_movie(&tools, &media, &settings, &preview, &cancel, |_| {}).unwrap();
+    let result = inspect(&tools, &preview).unwrap();
+    assert!(result.bytes <= 1_000_000);
+    assert_eq!(result.display.height, 480);
+    assert!((result.duration.unwrap() - 4.0).abs() < 0.1);
+    assert!(result.audio.is_some());
+    let compatible = proxy.file("compatible.mp4");
+    transcode::preview_movie_proxy(&tools, &preview, &compatible, &cancel).unwrap();
+    let result = inspect(&tools, &compatible).unwrap();
+    assert_eq!(result.display.height, 480);
+    assert!((result.duration.unwrap() - 4.0).abs() < 0.1);
+    assert!(result.audio.is_some());
+}
+
+#[test]
+#[ignore = "requires the bundled FFmpeg, FFprobe and Chinese font"]
+fn joins_only_the_selected_ranges_in_source_order() {
+    let tools = tools();
+    let directory = tempfile::tempdir().unwrap();
+    for with_audio in [true, false] {
+        let source = directory.path().join(format!("source-{with_audio}.mp4"));
+        let mut args = vec![
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=red:s=160x96:r=30:d=2[a];color=green:s=160x96:r=30:d=2[b];color=blue:s=160x96:r=30:d=2[c];[a][b][c]concat=n=3:v=1:a=0",
+        ];
+        if with_audio {
+            // The audio ends before the second selection starts.
+            args.extend([
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2",
+                "-c:a",
+                "aac",
+            ]);
+        }
+        args.extend(["-c:v", "mpeg4", source.to_str().unwrap()]);
+        command(&tools.ffmpeg, &args);
+        let media = inspect(&tools, &source).unwrap();
+        let mut settings = Settings {
+            media_id: 1,
+            format: OutputFormat::Mp4,
+            resolution: Resolution::Original,
+            target_bytes: None,
+            clips: vec![
+                Clip {
+                    start: 0.5,
+                    end: 1.5,
+                },
+                Clip {
+                    start: 4.5,
+                    end: 5.5,
+                },
+            ],
+            watermark: Watermark::Text {
+                text: "Joined".into(),
+                font_size: 16,
+                color: "#ffffff".into(),
+                opacity: 80,
+                position: Position::BottomRight,
+            },
+        };
+        assert_eq!(settings.output_duration(&media).unwrap(), Some(2.0));
+        let output = directory.path().join(format!("joined-{with_audio}.mp4"));
+        let destination = Destination::prepare(&source, &output, settings.format, false).unwrap();
+        assert!(matches!(
+            transcode::export(
+                &tools,
+                &media,
+                &settings,
+                destination,
+                &Control::default(),
+                |_| {}
+            )
+            .unwrap(),
+            Event::Succeeded { bytes: 1.., .. }
+        ));
+        let result = inspect(&tools, &output).unwrap();
+        assert!((result.duration.unwrap() - 2.0).abs() < 0.1);
+        assert_eq!(result.audio.is_some(), with_audio);
+        let frames = command(
+            &tools.ffmpeg,
+            &[
+                "-v",
+                "error",
+                "-i",
+                output.to_str().unwrap(),
+                "-vf",
+                "crop=2:2:10:10",
+                "-pix_fmt",
+                "rgb24",
+                "-fps_mode",
+                "passthrough",
+                "-f",
+                "rawvideo",
+                "pipe:1",
+            ],
+        );
+        assert_eq!(frames.len(), 60 * 12);
+        for (index, frame) in frames.chunks_exact(12).enumerate() {
+            let [r, g, b] = frame[..3] else {
+                unreachable!()
+            };
+            assert!(if index < 30 {
+                r > 200 && g < 25 && b < 25
+            } else {
+                b > 200 && r < 25 && g < 25
+            });
+        }
+        settings.clips[1].start = 1.0;
+        assert!(settings.output_duration(&media).is_err());
     }
 }
 
@@ -167,6 +339,7 @@ fn media_pipeline() {
             format,
             resolution: Resolution::P720,
             target_bytes: None,
+            clips: Vec::new(),
             watermark,
         };
         let preview =
@@ -302,6 +475,7 @@ fn media_pipeline() {
         media_id: 2,
         format: OutputFormat::Webm,
         target_bytes: None,
+        clips: Vec::new(),
         resolution: Resolution::P720,
         watermark: text,
     };

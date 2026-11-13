@@ -1,6 +1,7 @@
 use crate::{
-    media::{AppError, AppResult, Media, Plan, Settings, SizeBudget, Tools},
+    media::{AppError, AppResult, Clip, Media, OutputFormat, Plan, Settings, SizeBudget, Tools},
     output::Destination,
+    playback,
     watermark::{self, Overlay},
 };
 use serde::Serialize;
@@ -187,8 +188,8 @@ fn video_command(
     command
 }
 
-fn filters(media: &Media, plan: Plan, overlay: Option<&Overlay>, preview: bool) -> String {
-    let mut graph = format!("[0:{}]{}", media.video, plan.video_filter());
+fn filters(input: &str, plan: Plan, overlay: Option<&Overlay>, preview: bool) -> String {
+    let mut graph = format!("{input}{}", plan.video_filter());
     if let Some(overlay) = overlay {
         graph.push_str(&format!(
             "[base];[base][1:v]overlay={}:{}:eof_action=repeat:format=yuv444",
@@ -201,6 +202,58 @@ fn filters(media: &Media, plan: Plan, overlay: Option<&Overlay>, preview: bool) 
         );
     }
     graph.push_str("[video]");
+    graph
+}
+
+fn concat_filters(media: &Media, clips: &[Clip]) -> String {
+    use std::fmt::Write as _;
+
+    let count = clips.len();
+    let mut graph = format!("[0:{}]split={count}", media.video);
+    for index in 0..count {
+        write!(graph, "[v{index}]").unwrap();
+    }
+    graph.push(';');
+    if let Some(audio) = media.audio {
+        // Keep source time when audio starts late or ends before the video.
+        let end = clips[count - 1].end;
+        write!(
+            graph,
+            "[0:{}]aresample=async=1:first_pts=0,apad=whole_dur={end:.6},asplit={count}",
+            audio.index
+        )
+        .unwrap();
+        for index in 0..count {
+            write!(graph, "[a{index}]").unwrap();
+        }
+        graph.push(';');
+    }
+    for (index, clip) in clips.iter().enumerate() {
+        let bounds = format!("start={:.6}:end={:.6}", clip.start, clip.end);
+        write!(
+            graph,
+            "[v{index}]trim={bounds},setpts=PTS-STARTPTS[cv{index}];"
+        )
+        .unwrap();
+        if media.audio.is_some() {
+            write!(
+                graph,
+                "[a{index}]atrim={bounds},asetpts=PTS-STARTPTS[ca{index}];"
+            )
+            .unwrap();
+        }
+    }
+    for index in 0..count {
+        write!(graph, "[cv{index}]").unwrap();
+        if media.audio.is_some() {
+            write!(graph, "[ca{index}]").unwrap();
+        }
+    }
+    if media.audio.is_some() {
+        write!(graph, "concat=n={count}:v=1:a=1[joined][audio];").unwrap();
+    } else {
+        write!(graph, "concat=n={count}:v=1:a=0[joined];").unwrap();
+    }
     graph
 }
 
@@ -237,8 +290,12 @@ pub fn preview(
 ) -> AppResult<Preview> {
     let plan = Plan::new(media, settings.resolution)?;
     let overlay = watermark::prepare(tools, &settings.watermark, plan.output)?;
-    let mut seek = media.duration.map(|duration| (duration * 0.1).min(5.0));
-    let graph = filters(media, plan, None, true);
+    let mut seek = settings
+        .clips
+        .first()
+        .map(|clip| clip.start + (clip.duration() * 0.1).min(5.0))
+        .or_else(|| media.duration.map(|duration| (duration * 0.1).min(5.0)));
+    let graph = filters(&format!("[0:{}]", media.video), plan, None, true);
     loop {
         let mut command = video_command(tools, media, seek, None);
         command.arg("-filter_complex").arg(&graph).args([
@@ -294,33 +351,88 @@ pub fn export(
     control: &Control,
     send: impl Fn(Event) + Send + Clone + 'static,
 ) -> AppResult<Event> {
-    let plan = Plan::new(media, settings.resolution)?;
-    let mut budget = SizeBudget::plan(media, settings)?;
     let directory = Builder::new()
         .prefix(".video-trans-")
         .tempdir_in(&destination.directory)
         .map_err(AppError::io)?;
-    let overlay = watermark::prepare(tools, &settings.watermark, plan.output);
-    if control.cancelled() {
-        return Ok(Event::Cancelled);
-    }
-    let overlay = overlay?;
-
     let temporary = directory
         .path()
         .join(format!("output.{}", settings.format.extension()));
-    let watermark_path = directory.path().join("watermark.png");
+    if !encode(
+        tools,
+        media,
+        settings,
+        &temporary,
+        || control.cancelled(),
+        send.clone(),
+    )? || !control.finalize()
+    {
+        return Ok(Event::Cancelled);
+    }
+    send(Event::Finalizing);
+    let (path, bytes) = destination.commit(&temporary)?;
+    Ok(Event::Succeeded { path, bytes })
+}
+
+pub fn preview_movie(
+    tools: &Tools,
+    media: &Media,
+    settings: &Settings,
+    output: &Path,
+    cancel: &AtomicBool,
+    send: impl Fn(Event) + Send + Clone + 'static,
+) -> AppResult<()> {
+    if !encode(
+        tools,
+        media,
+        settings,
+        output,
+        || cancel.load(Ordering::Relaxed),
+        send,
+    )? {
+        return Err(AppError::new("Cancelled", "预览已取消。"));
+    }
+    playback::FileKey::new(output.to_path_buf())?;
+    Ok(())
+}
+
+fn encode(
+    tools: &Tools,
+    media: &Media,
+    settings: &Settings,
+    output: &Path,
+    cancelled: impl Fn() -> bool,
+    send: impl Fn(Event) + Send + Clone + 'static,
+) -> AppResult<bool> {
+    let plan = Plan::new(media, settings.resolution)?;
+    let duration = settings.output_duration(media)?;
+    let mut budget = SizeBudget::plan(media, settings)?;
+    if cancelled() {
+        return Ok(false);
+    }
+    let overlay = watermark::prepare(tools, &settings.watermark, plan.output)?;
+    let watermark_path = output.with_file_name("watermark.png");
     if let Some(mark) = &overlay {
         std::fs::write(&watermark_path, &mark.png).map_err(AppError::io)?;
     }
-    let graph = filters(media, plan, overlay.as_ref(), false);
-    let duration = media.duration;
+    let input = format!("[0:{}]", media.video);
+    let multiple = settings.clips.len() > 1;
+    let single = match settings.clips.as_slice() {
+        [clip] => Some(*clip),
+        _ => None,
+    };
+    let (mut graph, video_input) = if multiple {
+        (concat_filters(media, &settings.clips), "[joined]")
+    } else {
+        (String::new(), input.as_str())
+    };
+    graph.push_str(&filters(video_input, plan, overlay.as_ref(), false));
     send(Event::Running);
     for attempt in 0..3 {
         let mut command = video_command(
             tools,
             media,
-            None,
+            single.map(|clip| clip.start),
             overlay.as_ref().map(|_| watermark_path.as_path()),
         );
         command
@@ -328,58 +440,59 @@ pub fn export(
             .arg(&graph)
             .args(["-map", "[video]"]);
         if let Some(audio) = media.audio {
-            command.args(["-map", &format!("0:{}", audio.index)]);
+            if multiple {
+                command.args(["-map", "[audio]"]);
+            } else {
+                command.args(["-map", &format!("0:{}", audio.index)]);
+            }
+        }
+        if let Some(clip) = single {
+            command.args(["-t", &format!("{:.4}", clip.duration())]);
         }
         command
             .args(settings.format.encoding(media, plan.output, budget))
-            .arg(&temporary);
+            .arg(output);
 
         let progress = send.clone();
         send(Event::Progress {
             percent: duration.map(|_| 0),
         });
-        let result = process(
-            &mut command,
-            || control.cancelled(),
-            None,
-            move |stdout| {
-                let mut last = 0;
-                if let Some(duration) = duration {
-                    for line in BufReader::new(stdout).lines() {
-                        let line = line?;
-                        if let Some(elapsed) = line
-                            .strip_prefix("out_time_us=")
-                            .and_then(|value| value.parse::<i64>().ok())
-                        {
-                            let percent =
-                                (elapsed as f64 / duration / 10_000.0).clamp(0.0, 99.0) as u8;
-                            if percent > last {
-                                last = percent;
-                                progress(Event::Progress {
-                                    percent: Some(percent),
-                                });
-                            }
+        let result = process(&mut command, &cancelled, None, move |stdout| {
+            let mut last = 0;
+            if let Some(duration) = duration {
+                for line in BufReader::new(stdout).lines() {
+                    let line = line?;
+                    if let Some(elapsed) = line
+                        .strip_prefix("out_time_us=")
+                        .and_then(|value| value.parse::<i64>().ok())
+                    {
+                        let percent = (elapsed as f64 / duration / 10_000.0).clamp(0.0, 99.0) as u8;
+                        if percent > last {
+                            last = percent;
+                            progress(Event::Progress {
+                                percent: Some(percent),
+                            });
                         }
                     }
-                } else {
-                    std::io::copy(&mut BufReader::new(stdout), &mut std::io::sink())?;
                 }
-                Ok(Vec::new())
-            },
-        )?;
+            } else {
+                std::io::copy(&mut BufReader::new(stdout), &mut std::io::sink())?;
+            }
+            Ok(Vec::new())
+        })?;
         let Some(ProcessOutput { status, stderr, .. }) = result else {
-            return Ok(Event::Cancelled);
+            return Ok(false);
         };
         if !status.success() {
             return Err(encoder_error(&stderr));
         }
-        if control.cancelled() {
-            return Ok(Event::Cancelled);
+        if cancelled() {
+            return Ok(false);
         }
         let (Some(limit), Some(rates)) = (settings.target_bytes, budget.as_mut()) else {
             break;
         };
-        let actual = temporary.metadata().map_err(AppError::io)?.len();
+        let actual = output.metadata().map_err(AppError::io)?.len();
         if actual <= limit {
             break;
         }
@@ -393,12 +506,7 @@ pub fn export(
         rates.video_kbps = next.max(SizeBudget::MIN_VIDEO_KBPS);
         send(Event::Retrying);
     }
-    if !control.finalize() {
-        return Ok(Event::Cancelled);
-    }
-    send(Event::Finalizing);
-    let (path, bytes) = destination.commit(Path::new(&temporary))?;
-    Ok(Event::Succeeded { path, bytes })
+    Ok(true)
 }
 
 pub fn playback_proxy(
@@ -411,9 +519,37 @@ pub fn playback_proxy(
         return Err(AppError::new("Cancelled", "已取消准备播放。"));
     }
     let media = crate::media::inspect(tools, path)?;
-    let scale = crate::media::scaled_size(media.display, crate::media::Resolution::P720)
-        .unwrap_or(media.display);
-    if scale.width > 1280 || scale.height > 1280 {
+    playback_copy(tools, &media, output, None, false, cancel)
+}
+
+pub fn preview_movie_proxy(
+    tools: &Tools,
+    path: &Path,
+    output: &Path,
+    cancel: &AtomicBool,
+) -> AppResult<()> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(AppError::new("Cancelled", "已取消准备播放。"));
+    }
+    let media = crate::media::inspect(tools, path)?;
+    playback_copy(tools, &media, output, None, true, cancel)
+}
+
+fn playback_copy(
+    tools: &Tools,
+    media: &Media,
+    output: &Path,
+    clip: Option<Clip>,
+    keep_size: bool,
+    cancel: &AtomicBool,
+) -> AppResult<()> {
+    let scale = if keep_size {
+        media.display
+    } else {
+        crate::media::scaled_size(media.display, crate::media::Resolution::P720)
+            .unwrap_or(media.display)
+    };
+    if !keep_size && (scale.width > 1280 || scale.height > 1280) {
         return Err(AppError::new(
             "PlaybackFailed",
             "无法为此画面尺寸生成播放预览。",
@@ -423,7 +559,7 @@ pub fn playback_proxy(
     let height = scale.height.next_multiple_of(2);
     let filter = format!("scale={width}:{height}:flags=bicubic,setsar=1");
 
-    let mut command = video_command(tools, &media, None, None);
+    let mut command = video_command(tools, media, clip.map(|clip| clip.start), None);
     command.args(["-map", &format!("0:{}", media.video), "-vf", &filter]);
     if let Some(audio) = media.audio {
         command.args([
@@ -437,21 +573,26 @@ pub fn playback_proxy(
             "128k",
         ]);
     }
-    command
-        .args(crate::media::h264_encoder())
-        .args([
-            "-pix_fmt",
-            "yuv420p",
-            "-b:v",
-            "2200k",
-            "-fps_mode",
-            "passthrough",
-            "-movflags",
-            "+faststart",
-            "-f",
-            "mp4",
-        ])
-        .arg(output);
+    command.args(crate::media::h264_encoder()).args([
+        "-pix_fmt",
+        "yuv420p",
+        "-b:v",
+        if keep_size || clip.is_some() {
+            "16000k"
+        } else {
+            "2200k"
+        },
+        "-fps_mode",
+        "passthrough",
+        "-movflags",
+        "+faststart",
+        "-f",
+        "mp4",
+    ]);
+    if let Some(clip) = clip {
+        command.args(["-t", &format!("{:.4}", clip.duration())]);
+    }
+    command.arg(output);
 
     let result = process(
         &mut command,
@@ -468,4 +609,79 @@ pub fn playback_proxy(
             .diagnostic(String::from_utf8_lossy(&result.stderr))),
         None => Err(AppError::new("Cancelled", "已取消准备播放。")),
     }
+}
+
+pub fn compression_sample(
+    tools: &Tools,
+    media: &Media,
+    settings: &Settings,
+    proxy: &crate::playback::Proxy,
+    cancel: &AtomicBool,
+) -> AppResult<(PathBuf, &'static str, Clip)> {
+    let duration = settings
+        .output_duration(media)?
+        .filter(|duration| *duration > 0.0)
+        .ok_or_else(|| AppError::new("InvalidClip", "需要已知的视频时长才能生成压缩样片。"))?;
+    let (start, duration) = settings
+        .clips
+        .first()
+        .map_or((0.0, duration), |clip| (clip.start, clip.duration()));
+    let clip = Clip {
+        start,
+        end: start + duration.min(5.0),
+    };
+    let plan = Plan::new(media, settings.resolution)?;
+    let budget = SizeBudget::plan(media, settings)?;
+    let overlay = watermark::prepare(tools, &settings.watermark, plan.output)?;
+    let watermark_path = proxy.file("watermark.png");
+    if let Some(mark) = &overlay {
+        std::fs::write(&watermark_path, &mark.png).map_err(AppError::io)?;
+    }
+    // MP4 and MOV share the same video and audio encoders. Use MP4 for browser playback.
+    let (format, mime) = if settings.format == OutputFormat::Webm {
+        (OutputFormat::Webm, "video/webm")
+    } else {
+        (OutputFormat::Mp4, "video/mp4")
+    };
+    let output = proxy.file(&format!("sample.{}", format.extension()));
+    let mut command = video_command(
+        tools,
+        media,
+        Some(start),
+        overlay.as_ref().map(|_| watermark_path.as_path()),
+    );
+    command.args([
+        "-filter_complex",
+        &filters(
+            &format!("[0:{}]", media.video),
+            plan,
+            overlay.as_ref(),
+            false,
+        ),
+        "-map",
+        "[video]",
+    ]);
+    if let Some(audio) = media.audio {
+        command.args(["-map", &format!("0:{}", audio.index)]);
+    }
+    command
+        .args(["-t", &format!("{:.4}", clip.duration())])
+        .args(format.encoding(media, plan.output, budget))
+        .arg(&output);
+    let result = process(
+        &mut command,
+        || cancel.load(Ordering::Relaxed),
+        None,
+        |mut stdout| {
+            std::io::copy(&mut stdout, &mut std::io::sink())?;
+            Ok(Vec::new())
+        },
+    )?;
+    match result {
+        Some(result) if result.status.success() => {}
+        Some(result) => return Err(encoder_error(&result.stderr)),
+        None => return Err(AppError::new("Cancelled", "预览已取消。")),
+    }
+    playback_copy(tools, media, &proxy.path(), Some(clip), false, cancel)?;
+    Ok((output, mime, clip))
 }

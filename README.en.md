@@ -24,6 +24,7 @@ Go to [GitHub Releases](https://github.com/Bordertrail/video-trans/releases) and
 - **Watermarks** — Add text or image watermarks and adjust their size, opacity, and position. Drag a watermark directly in the preview to position it.
 - **Playback and workspaces** — Play source and exported videos in the app. Add multiple folders as workspaces, filter videos by modification date or format, and open a preview before importing.
 - **Export folders** — Set a default folder, reuse a recent folder, or remove an entry from the history. Export filenames include a local timestamp by default.
+- **Presets, compression previews, and trimming** — Save and reuse export settings, compare up to five seconds of compressed footage with a source reference, or drag the handles on the playback timeline to select clips. Export joins multiple selections into one video in source order. With trimming enabled, the compression preview uses the first clip.
 
 The published v0.2.4 installers predate file size limits and export history removal. These features were added in the local development builds v0.2.5 and v0.2.6, respectively.
 

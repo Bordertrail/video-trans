@@ -81,7 +81,11 @@ impl Proxy {
     }
 
     pub fn path(&self) -> PathBuf {
-        self.directory.path().join("playback.mp4")
+        self.file("playback.mp4")
+    }
+
+    pub fn file(&self, name: &str) -> PathBuf {
+        self.directory.path().join(name)
     }
 }
 

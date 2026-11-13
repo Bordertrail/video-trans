@@ -177,8 +177,8 @@ impl SizeBudget {
                 "目标大小须在 1 MB 和源文件大小之间。",
             ));
         }
-        let duration = media
-            .duration
+        let duration = settings
+            .output_duration(media)?
             .filter(|duration| *duration > 0.0)
             .ok_or_else(|| {
                 AppError::new(
@@ -291,7 +291,52 @@ pub struct Settings {
     pub format: OutputFormat,
     pub resolution: Resolution,
     pub target_bytes: Option<u64>,
+    #[serde(default)]
+    pub clips: Vec<Clip>,
     pub watermark: Watermark,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+pub struct Clip {
+    pub start: f64,
+    pub end: f64,
+}
+
+impl Clip {
+    pub fn duration(self) -> f64 {
+        self.end - self.start
+    }
+}
+
+impl Settings {
+    pub fn output_duration(&self, media: &Media) -> AppResult<Option<f64>> {
+        if self.clips.is_empty() {
+            return Ok(media.duration);
+        }
+        let invalid = || {
+            AppError::new(
+                "InvalidClip",
+                "片段须按时间顺序排列、互不重叠，每段至少 0.1 秒，最多 32 段。",
+            )
+        };
+        let duration = media.duration.ok_or_else(invalid)?;
+        if self.clips.len() > 32 {
+            return Err(invalid());
+        }
+        let mut previous_end = 0.0;
+        let mut total = 0.0;
+        for clip in &self.clips {
+            if !(clip.start >= previous_end
+                && clip.end <= duration
+                && clip.duration() >= 0.1 - 1e-9)
+            {
+                return Err(invalid());
+            }
+            previous_end = clip.end;
+            total += clip.duration();
+        }
+        Ok(Some(total))
+    }
 }
 
 #[derive(Clone, Copy)]

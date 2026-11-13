@@ -43,6 +43,7 @@ struct Playback {
     server: Option<playback::Server>,
     preparation: Option<Arc<playback::Preparation>>,
     cached: Option<(playback::FileKey, Arc<playback::Proxy>)>,
+    output_preview: Option<(Arc<playback::Proxy>, PathBuf)>,
 }
 
 impl Playback {
@@ -53,6 +54,7 @@ impl Playback {
         if let Some(preparation) = &self.preparation {
             preparation.cancel();
         }
+        self.output_preview = None;
     }
 
     fn publish(
@@ -77,6 +79,8 @@ struct Session {
     last_output: Mutex<Option<PathBuf>>,
     playback: Mutex<Playback>,
     workspace_playback: Mutex<Playback>,
+    sample_playback: Mutex<Playback>,
+    sample_reference: Mutex<Playback>,
 }
 
 impl Session {
@@ -114,6 +118,7 @@ struct ExportPlan {
     p480: bool,
     resolution_error: Option<AppError>,
     target_size_error: Option<AppError>,
+    clip_error: Option<AppError>,
 }
 
 #[derive(Serialize)]
@@ -192,6 +197,7 @@ fn get_export_plan(settings: Settings, session: State<'_, Session>) -> AppResult
         size,
         resolution_error,
         target_size_error: media::SizeBudget::plan(&media, &settings).err(),
+        clip_error: settings.output_duration(&media).err(),
         p1080: Plan::new(&media, Resolution::P1080).is_ok(),
         p720: Plan::new(&media, Resolution::P720).is_ok(),
         p480: Plan::new(&media, Resolution::P480).is_ok(),
@@ -241,6 +247,7 @@ fn start_export(
     let session = app.state::<Session>();
     let media = session.media(settings.media_id)?;
     Plan::new(&media, settings.resolution)?;
+    settings.output_duration(&media)?;
     media::SizeBudget::plan(&media, &settings)?;
     let destination = Destination::prepare(&media.path, &path, settings.format, overwrite)?;
 
@@ -363,6 +370,83 @@ async fn playback_url(
 }
 
 #[tauri::command]
+async fn output_preview_url(
+    settings: Settings,
+    request_id: u32,
+    compatible: bool,
+    on_event: Channel<Event>,
+    app: AppHandle,
+) -> AppResult<String> {
+    let session = app.state::<Session>();
+    let media = session.media(settings.media_id)?;
+    let (preparation, encoded) = {
+        let mut playback = session.playback.lock().unwrap();
+        if request_id < playback.request_id {
+            return Err(playback_cancelled());
+        }
+        let encoded = if compatible && request_id == playback.request_id {
+            playback.output_preview.take()
+        } else {
+            None
+        };
+        playback.stop();
+        playback.request_id = request_id;
+        let preparation = Arc::new(playback::Preparation::default());
+        playback.preparation = Some(preparation.clone());
+        (preparation, encoded)
+    };
+    let worker = preparation.clone();
+    let tools = app.state::<Tools>().inner().clone();
+    let output = tauri::async_runtime::spawn_blocking(move || {
+        let result = (|| {
+            let (proxy, path) = match encoded {
+                Some(encoded) => encoded,
+                None => {
+                    let proxy = Arc::new(playback::Proxy::new()?);
+                    let path = proxy.file(&format!("preview.{}", settings.format.extension()));
+                    transcode::preview_movie(
+                        &tools,
+                        &media,
+                        &settings,
+                        &path,
+                        &worker.cancelled,
+                        move |event| {
+                            let _ = on_event.send(event);
+                        },
+                    )?;
+                    (proxy, path)
+                }
+            };
+            if compatible {
+                let playable = proxy.path();
+                transcode::preview_movie_proxy(&tools, &path, &playable, &worker.cancelled)?;
+                return Ok((proxy, "video/mp4", playable));
+            }
+            let mime = match settings.format {
+                media::OutputFormat::Mp4 => "video/mp4",
+                media::OutputFormat::Mov => "video/quicktime",
+                media::OutputFormat::Webm => "video/webm",
+            };
+            Ok((proxy, mime, path))
+        })();
+        worker.finish();
+        result
+    })
+    .await
+    .map_err(worker_error)?;
+    let mut playback = session.playback.lock().unwrap();
+    if request_id != playback.request_id || preparation.cancelled.load(Ordering::Relaxed) {
+        return Err(playback_cancelled());
+    }
+    playback.preparation = None;
+    let (proxy, mime, path) = output?;
+    if !compatible {
+        playback.output_preview = Some((proxy.clone(), path.clone()));
+    }
+    playback.publish(path, mime, Some(proxy))
+}
+
+#[tauri::command]
 async fn workspace_playback_url(
     workspace: PathBuf,
     path: PathBuf,
@@ -455,6 +539,73 @@ fn stop_playback(request_id: u32, session: State<'_, Session>) {
 #[tauri::command]
 fn stop_workspace_playback(request_id: u32, session: State<'_, Session>) {
     stop_playback_at(&session.workspace_playback, request_id);
+}
+
+#[derive(Serialize)]
+struct Sample {
+    compressed: String,
+    reference: String,
+    start: f64,
+    end: f64,
+}
+
+#[tauri::command]
+async fn compression_sample(
+    settings: Settings,
+    request_id: u32,
+    app: AppHandle,
+) -> AppResult<Sample> {
+    let session = app.state::<Session>();
+    let media = session.media(settings.media_id)?;
+    let preparation = {
+        let mut playback = session.sample_playback.lock().unwrap();
+        if request_id < playback.request_id {
+            return Err(playback_cancelled());
+        }
+        playback.stop();
+        playback.request_id = request_id;
+        let preparation = Arc::new(playback::Preparation::default());
+        playback.preparation = Some(preparation.clone());
+        preparation
+    };
+    let worker = preparation.clone();
+    let tools = app.state::<Tools>().inner().clone();
+    let sample = tauri::async_runtime::spawn_blocking(move || {
+        let result = playback::Proxy::new().and_then(|proxy| {
+            let (path, mime, clip) = transcode::compression_sample(
+                &tools,
+                &media,
+                &settings,
+                &proxy,
+                &worker.cancelled,
+            )?;
+            Ok((Arc::new(proxy), path, mime, clip))
+        });
+        worker.finish();
+        result
+    })
+    .await
+    .map_err(worker_error)?;
+    let mut playback = session.sample_playback.lock().unwrap();
+    if request_id != playback.request_id || preparation.cancelled.load(Ordering::Relaxed) {
+        return Err(playback_cancelled());
+    }
+    playback.preparation = None;
+    let (proxy, path, mime, clip) = sample?;
+    let mut reference = session.sample_reference.lock().unwrap();
+    reference.request_id = request_id;
+    Ok(Sample {
+        compressed: playback.publish(path, mime, Some(proxy.clone()))?,
+        reference: reference.publish(proxy.path(), "video/mp4", Some(proxy))?,
+        start: clip.start,
+        end: clip.end,
+    })
+}
+
+#[tauri::command]
+fn stop_compression_sample(request_id: u32, session: State<'_, Session>) {
+    stop_playback_at(&session.sample_playback, request_id);
+    stop_playback_at(&session.sample_reference, request_id);
 }
 
 fn stop_playback_at(state: &Mutex<Playback>, request_id: u32) {
@@ -576,16 +727,24 @@ fn main() {
             exit_after_export,
             open_result,
             playback_url,
+            output_preview_url,
             stop_playback,
             workspace_playback_url,
             stop_workspace_playback,
+            compression_sample,
+            stop_compression_sample,
         ])
         .build(tauri::generate_context!())
         .expect("could not start the desktop app")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
                 let session = app.state::<Session>();
-                for state in [&session.playback, &session.workspace_playback] {
+                for state in [
+                    &session.playback,
+                    &session.workspace_playback,
+                    &session.sample_playback,
+                    &session.sample_reference,
+                ] {
                     let mut playback = state.lock().unwrap();
                     playback.stop();
                     if let Some(preparation) = playback.preparation.take() {

@@ -1,6 +1,6 @@
 [package]
 name = "video-trans"
-version = "0.2.9"
+version = "0.3.4"
 edition = "2021"
 
 [build-dependencies]

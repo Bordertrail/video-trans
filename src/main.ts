@@ -7,6 +7,7 @@ import { bindAttribute, bindText, locale, setLanguage, t, translatePage } from '
 import { installLibrary } from './library';
 import { directoryPrefix, fileName, inDirectory, isWindows } from './paths';
 import './style.css';
+import { installTrimTimeline, totalClipDuration, trimMarkup, type Clip } from './trim';
 
 type Format = 'mp4' | 'webm' | 'mov';
 type Resolution = 'original' | '1080p' | '720p' | '480p';
@@ -16,7 +17,7 @@ type Media = {
   mediaId: number; name: string; path: string; bytes: number; duration: number | null;
   display: Size; hasAudio: boolean; unsupported: string | null;
 };
-type Plan = { size: Size | null; p1080: boolean; p720: boolean; p480: boolean; resolutionError: AppError | null; targetSizeError: AppError | null };
+type Plan = { size: Size | null; p1080: boolean; p720: boolean; p480: boolean; resolutionError: AppError | null; targetSizeError: AppError | null; clipError: AppError | null };
 type PresetPosition = 'topLeft' | 'topRight' | 'bottomLeft' | 'bottomRight' | 'center';
 type Point = { x: number; y: number };
 type Position = PresetPosition | Point;
@@ -25,13 +26,15 @@ type Watermark =
   | { kind: 'off' }
   | { kind: 'text'; text: string; fontSize: number; color: string; opacity: number; position: Position }
   | { kind: 'image'; path: string; widthPercent: number; opacity: number; position: Position };
-type Settings = { mediaId: number; format: Format; resolution: Resolution; targetBytes: number | null; watermark: Watermark };
-type JobEvent = { jobId: number } & (
+type Preset = { format: Format; resolution: Resolution; targetBytes: number | null; watermark: Watermark };
+type Settings = Preset & { mediaId: number; clips: Clip[] };
+type Sample = { reference: string; compressed: string; start: number; end: number };
+type ConversionEvent =
   | { type: 'running' | 'retrying' | 'finalizing' | 'cancelled' }
   | { type: 'progress'; percent: number | null }
   | { type: 'succeeded'; path: string; bytes: number }
-  | { type: 'failed'; error: AppError }
-);
+  | { type: 'failed'; error: AppError };
+type JobEvent = { jobId: number } & ConversionEvent;
 
 document.querySelector('#app')!.innerHTML = `
   <header class="page-header">
@@ -57,6 +60,8 @@ document.querySelector('#app')!.innerHTML = `
         <header class="workspace-head">
           <h2 id="video-title" data-i18n>视频预览</h2>
           <div class="workspace-actions">
+            <button type="button" class="button subtle" id="trim-button" aria-controls="trim-timeline" aria-expanded="false" hidden data-i18n>截取片段</button>
+            <button type="button" class="button subtle" id="trim-restore" hidden data-i18n>恢复全片</button>
             <button type="button" class="button secondary" id="workspaces" data-i18n>工作空间</button>
             <button type="button" class="button subtle" id="replace" hidden data-i18n>更换视频</button>
           </div>
@@ -65,8 +70,8 @@ document.querySelector('#app')!.innerHTML = `
           <div id="preview-modes" class="viewer-toolbar" hidden>
             <div class="preview-modes" role="group" aria-label="预览模式" data-i18n-attrs>
               <button type="button" id="play-source" aria-pressed="false" data-i18n>源视频</button>
-              <button type="button" id="still-preview" aria-pressed="true" data-i18n>水印预览</button>
-              <button type="button" id="play-result" aria-pressed="false" hidden data-i18n>成品</button>
+              <button type="button" id="still-preview" aria-pressed="true" data-i18n>成片预览</button>
+              <button type="button" id="play-result" aria-pressed="false" hidden data-i18n>已导出</button>
             </div>
           </div>
           <div class="viewer-stage">
@@ -82,12 +87,16 @@ document.querySelector('#app')!.innerHTML = `
                 <img id="watermark-layer" class="watermark-layer" alt="水印，可拖动或用方向键调整位置" tabindex="0" draggable="false" hidden data-i18n-attrs>
               </div>
               <p id="preview-status" role="status" data-i18n>正在生成预览…</p>
+              <button type="button" id="preview-movie" class="preview-play" aria-label="播放预览" data-i18n-attrs hidden>
+                <span aria-hidden="true"></span>
+              </button>
             </div>
             <div id="playback-panel" class="preview playback" hidden>
               <video id="video-player" controls playsinline preload="metadata" aria-label="视频播放器" hidden data-i18n-attrs></video>
               <p id="playback-status" role="status" hidden></p>
             </div>
           </div>
+          ${trimMarkup}
           <footer id="viewer-file" class="viewer-file" hidden>
             <span class="file-icon" aria-hidden="true"></span>
             <div class="file-info">
@@ -115,7 +124,10 @@ document.querySelector('#app')!.innerHTML = `
       </section>
     </div>
     <section class="settings" aria-labelledby="settings-title">
-      <h2 id="settings-title" data-i18n>输出设置</h2>
+      <header class="settings-heading">
+        <h2 id="settings-title" data-i18n>输出设置</h2>
+        <button type="button" class="button subtle" id="presets-button" aria-haspopup="dialog" data-i18n>常用预设</button>
+      </header>
       <div class="settings-scroll">
         <fieldset id="controls">
           <label class="field" for="format"><span data-i18n>格式</span>
@@ -126,7 +138,7 @@ document.querySelector('#app')!.innerHTML = `
           </label>
           <p id="dimensions" class="hint" hidden></p>
           <label class="field" for="target-size"><span data-i18n>目标大小上限（MB）</span>
-            <input id="target-size" type="number" min="1" step="any" placeholder="自动" aria-describedby="target-size-hint" disabled data-i18n-attrs>
+            <input id="target-size" type="number" min="1" step="any" placeholder="自动" aria-describedby="target-size-hint" data-i18n-attrs>
             <span id="target-size-hint" class="hint" hidden></span>
           </label>
           <div class="field">
@@ -170,7 +182,10 @@ document.querySelector('#app')!.innerHTML = `
         </fieldset>
         <p id="settings-error" class="message error" role="alert" hidden></p>
       </div>
-      <button type="button" id="start" class="button primary" disabled data-i18n>开始转换</button>
+      <div class="export-actions">
+        <button type="button" id="sample-button" class="button secondary" disabled data-i18n>压缩预览</button>
+        <button type="button" id="start" class="button primary" disabled data-i18n>开始转换</button>
+      </div>
     </section>
   </main>
   <dialog id="about" class="about-dialog" aria-labelledby="about-title">
@@ -200,6 +215,27 @@ document.querySelector('#app')!.innerHTML = `
     <form method="dialog" class="dialog-actions">
       <button class="button secondary" autofocus data-i18n>关闭</button>
     </form>
+  </dialog>
+  <dialog id="presets-dialog" aria-labelledby="presets-title">
+    <h2 id="presets-title" data-i18n>常用预设</h2>
+    <div id="preset-list" class="library-list preset-list"></div>
+    <form id="preset-form" class="preset-form">
+      <label class="field"><span data-i18n>预设名称</span><input id="preset-name" type="text" maxlength="60" required></label>
+      <button class="button secondary" type="submit" data-i18n>保存当前设置</button>
+    </form>
+    <p id="preset-status" class="message" role="status" hidden></p>
+    <form method="dialog" class="dialog-actions"><button class="button secondary" data-i18n>关闭</button></form>
+  </dialog>
+  <dialog id="sample-dialog" class="sample-dialog" aria-labelledby="sample-title">
+    <header class="library-heading">
+      <h2 id="sample-title" data-i18n>压缩预览</h2>
+      <form method="dialog"><button class="button secondary" data-i18n>关闭</button></form>
+    </header>
+    <p id="sample-status" role="status"></p>
+    <div id="sample-players" class="split" hidden>
+      <div><h3 data-i18n>原片参考</h3><video id="sample-reference" controls playsinline preload="metadata"></video></div>
+      <div><h3 data-i18n>压缩样片</h3><video id="sample-compressed" controls playsinline preload="metadata"></video></div>
+    </div>
   </dialog>
   <dialog id="confirmation">
     <form method="dialog">
@@ -240,9 +276,11 @@ let busy = false;
 let jobId: number | null = null;
 let canStart = false;
 let playbackId = 0;
-let playing: 'source' | 'result' | null = null;
+let playing: 'source' | 'result' | 'preview' | null = null;
 let readingVideo = false;
 let result: { path: string; bytes: number; size: Size | null } | null = null;
+let clips: Clip[] = [];
+let sampleRequest = 0;
 
 function errorFrom(error: unknown): AppError {
   if (typeof error === 'object' && error !== null && 'message' in error && 'code' in error) {
@@ -264,6 +302,10 @@ function bytes(size: number): string {
   return `${(size / 1_000_000_000).toFixed(2)} GB`;
 }
 
+function secondsLabel(seconds: number) {
+  return new Intl.NumberFormat(locale(), { maximumFractionDigits: 3 }).format(seconds) + ' s';
+}
+
 function time(duration: number | null): string {
   if (duration === null) return '时长未知';
   const seconds = Math.round(duration);
@@ -278,8 +320,7 @@ function exportTimestamp(date: Date): string {
   return `${date.getFullYear()}-${day.map(twoDigits).join('-')}_${time.map(twoDigits).join('-')}`;
 }
 
-function settings(): Settings | null {
-  if (!media) return null;
+function presetSettings(): Preset {
   const kind = select('watermark').value;
   const opacity = input('opacity').valueAsNumber;
   const value = select('position').value;
@@ -290,7 +331,6 @@ function settings(): Settings | null {
       ? { kind, path: imagePath, widthPercent: input('image-width').valueAsNumber, opacity, position }
       : { kind: 'off' };
   return {
-    mediaId: media.mediaId,
     format: select('format').value as Format,
     resolution: select('resolution').value as Resolution,
     targetBytes: input('target-size').value === '' ? null : Math.round(input('target-size').valueAsNumber * 1_000_000),
@@ -298,15 +338,18 @@ function settings(): Settings | null {
   };
 }
 
-function syncTargetSize(reset = true) {
+function settings(): Settings | null {
+  if (!media) return null;
+  return { ...presetSettings(), mediaId: media.mediaId, clips };
+}
+
+function syncTargetSize() {
   const target = input('target-size');
-  if (reset) target.value = '';
   const maximum = media ? media.bytes / 1_000_000 : 0;
-  target.disabled = maximum < 1 || !media?.duration;
-  target.max = String(maximum);
+  target.max = media ? String(maximum) : '';
   bindAttribute(target, 'placeholder', !media ? '自动' : maximum < 1 ? '源文件小于 1 MB' : !media.duration ? '视频时长未知' : '自动');
   const displayedMax = new Intl.NumberFormat(locale(), { maximumFractionDigits: 3 }).format(Math.floor(maximum * 1000) / 1000);
-  message('target-size-hint', target.disabled ? '' : () => t('可填 1–{max} MB，留空为自动。', { max: displayedMax }));
+  message('target-size-hint', !media || maximum < 1 || !media.duration ? '' : () => t('可填 1–{max} MB，留空为自动。', { max: displayedMax }));
 }
 
 function targetSizeInputError() {
@@ -408,15 +451,24 @@ function setBusy(value: boolean) {
   button('workspaces').disabled = value;
   button('output-dirs').disabled = value;
   button('choose').disabled = value;
-  button('start').disabled = value || !canStart;
+  button('trim-button').disabled = value;
+  button('trim-restore').disabled = value;
+  setCanStart(canStart);
+}
+
+function syncPreviewPlay() {
+  button('preview-movie').hidden = !media || playing !== null || busy || trim.active || !canStart;
 }
 
 function setCanStart(value: boolean) {
   canStart = value;
-  button('start').disabled = busy || !value;
+  button('start').disabled = busy || trim.active || !value;
+  button('sample-button').disabled = busy || trim.active || !value || !media?.duration;
+  syncPreviewPlay();
 }
 
 function schedulePreview() {
+  if (playing === 'preview') showStillPreview();
   const requestId = ++previewId;
   clearTimeout(previewTimer);
   setCanStart(false);
@@ -442,7 +494,7 @@ async function refreshPreview(requestId: number) {
     }
     const size = plan.size;
     message('dimensions', size ? () => t('输出尺寸 {width} × {height}', size) : '');
-    const validation = plan.resolutionError?.message || watermarkError(current.watermark);
+    const validation = plan.resolutionError?.message || plan.clipError?.message || watermarkError(current.watermark);
     const sizeError = targetSizeInputError() || plan.targetSizeError?.message || '';
     message('settings-error', validation || sizeError);
     if (validation || !plan.size) {
@@ -458,6 +510,7 @@ async function refreshPreview(requestId: number) {
     showPreview(data, plan.size);
     message('preview-status');
     setCanStart(!sizeError);
+    syncViewer();
   } catch (reason) {
     if (!isCurrent()) return;
     const error = errorFrom(reason);
@@ -473,14 +526,22 @@ async function refreshPreview(requestId: number) {
 
 function syncViewer() {
   const showingResult = playing === 'result';
+  const showingMovie = playing === 'preview';
+  const onPreviewTab = playing === null || showingMovie;
   const file = showingResult ? result : media;
   const filename = showingResult && result ? fileName(result.path) : media?.name;
-  const size = showingResult ? result?.size : media?.display;
+  const size = showingResult ? result?.size : onPreviewTab ? frameSize ?? media?.display : media?.display;
   const info = [];
   if (size) info.push(`${size.width} × ${size.height}`);
-  if (!showingResult && media) info.push(t(time(media.duration)));
-  if (file) info.push(bytes(file.bytes));
+  if (showingMovie) info.push(select('format').value.toUpperCase());
+  if (!showingResult && media && !(showingMovie && clips.length)) info.push(t(time(media.duration)));
+  if (file && !showingMovie) info.push(bytes(file.bytes));
   if (!showingResult && media && !media.hasAudio) info.push(t('无音轨'));
+  if (!showingResult && clips.length) {
+    info.push(t('已选 {count} 段 · 共 {duration}', {
+      count: clips.length, duration: secondsLabel(totalClipDuration(clips)),
+    }));
+  }
 
   element('viewer-file').hidden = !file;
   element('filename').textContent = filename ?? '';
@@ -492,14 +553,18 @@ function syncViewer() {
   button('still-preview').hidden = !media;
   button('play-result').hidden = !result;
   button('play-source').setAttribute('aria-pressed', String(playing === 'source'));
-  button('still-preview').setAttribute('aria-pressed', String(playing === null));
+  button('still-preview').setAttribute('aria-pressed', String(onPreviewTab));
   button('play-result').setAttribute('aria-pressed', String(showingResult));
+  syncPreviewPlay();
 
   button('replace').hidden = !media && !readingVideo && playing === null;
+  button('trim-button').hidden = !media?.duration || media.duration < 0.1;
+  button('trim-restore').hidden = !clips.length || trim.active;
   bindText(button('replace'), media || readingVideo ? '更换视频' : '选择视频');
   element('drop-zone').hidden = Boolean(media || readingVideo || playing);
   previewPanel.hidden = playing !== null || (!media && !readingVideo);
   element('playback-panel').hidden = playing === null;
+  trim.sync();
 }
 
 function resetPlayer() {
@@ -512,6 +577,7 @@ function resetPlayer() {
 }
 
 function showStillPreview() {
+  trim.close();
   const id = ++playbackId;
   if (playing) void invoke('stop_playback', { requestId: id }).catch(() => {});
   playing = null;
@@ -519,11 +585,64 @@ function showStillPreview() {
   syncViewer();
 }
 
-function playMedia(kind: 'source' | 'result') {
+function playOutputPreview() {
+  const current = settings();
+  if (!current || busy || !canStart || trim.active) return;
+  const restoreFocus = document.activeElement === button('preview-movie');
+  const requestId = ++playbackId;
+  playing = 'preview';
+  resetPlayer();
+  syncViewer();
+  if (restoreFocus) button('still-preview').focus({ preventScroll: true });
+  bindAttribute(player, 'aria-label', '成片预览播放器');
+  const isCurrent = () => requestId === playbackId && playing === 'preview';
+  const types = {
+    mp4: 'video/mp4; codecs="avc1.42E01E"',
+    mov: 'video/quicktime',
+    webm: 'video/webm; codecs="vp9"',
+  };
+
+  async function load(compatible: boolean) {
+    const onEvent = new Channel<ConversionEvent>();
+    let retrying = false;
+    message('playback-status', '正在生成成片预览…');
+    onEvent.onmessage = event => {
+      if (!isCurrent()) return;
+      if (event.type === 'retrying') retrying = true;
+      if (event.type === 'progress') {
+        const percent = event.percent;
+        const label = retrying ? '正在降低码率后重试' : '正在生成成片预览…';
+        message('playback-status', percent === null ? label : () => `${t(label)} ${percent}%`);
+      }
+    };
+    try {
+      const url = await invoke<string>('output_preview_url', { settings: current, requestId, compatible, onEvent });
+      if (!isCurrent()) return;
+      player.onerror = () => {
+        if (!isCurrent()) return;
+        resetPlayer();
+        if (compatible) message('playback-status', '无法播放此视频。');
+        else void load(true);
+      };
+      player.onloadeddata = () => {
+        if (isCurrent()) message('playback-status');
+      };
+      player.hidden = false;
+      player.src = url;
+      void player.play().catch(() => {});
+    } catch (reason) {
+      if (isCurrent()) message('playback-status', errorFrom(reason).message);
+    }
+  }
+  void load(!player.canPlayType(types[current.format]));
+}
+
+function playMedia(kind: 'source' | 'result', autoplay = true) {
   const mediaId = kind === 'source' ? media?.mediaId : null;
   if (mediaId === undefined || (kind === 'result' && !result)) return;
+  if (kind === 'result') trim.close();
   if (playing === kind && player.hasAttribute('src')) {
-    void player.play().catch(() => {});
+    if (autoplay && !trim.active) void player.play().catch(() => {});
     return;
   }
 
@@ -561,7 +680,7 @@ function playMedia(kind: 'source' | 'result') {
       };
       player.src = url;
       player.hidden = false;
-      void player.play().catch(() => {});
+      if (autoplay && !trim.active) void player.play().catch(() => {});
     } catch (reason) {
       if (requestId !== playbackId) return;
       message('playback-status', errorFrom(reason).message);
@@ -576,6 +695,7 @@ async function loadVideo(path: string) {
   ++previewId;
   readingVideo = true;
   media = null;
+  clips = [];
   syncTargetSize();
   showStillPreview();
   clearPreview();
@@ -637,6 +757,173 @@ function confirm(title: string, body: string, action: string): Promise<boolean> 
   });
 }
 
+type NamedPreset = Preset & { name: string };
+
+function installPresets() {
+  const storageKey = 'video-trans-presets';
+  const dialog = element<HTMLDialogElement>('presets-dialog');
+  const list = element('preset-list');
+  const nameField = input('preset-name');
+  let presets: NamedPreset[] = [];
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(storageKey) ?? '[]');
+    if (Array.isArray(saved)) {
+      presets = saved.filter(preset => typeof preset?.name === 'string'
+        && ['mp4', 'mov', 'webm'].includes(preset.format)
+        && ['original', '1080p', '720p', '480p'].includes(preset.resolution)
+        && ['off', 'text', 'image'].includes(preset.watermark?.kind));
+    }
+  } catch {
+    // A broken preferences entry should not prevent the app from opening.
+  }
+
+  function savePresets(next: NamedPreset[]) {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(next));
+      presets = next;
+      render();
+      return true;
+    } catch {
+      message('preset-status', '无法保存预设。');
+      return false;
+    }
+  }
+
+  function apply(preset: NamedPreset) {
+    select('format').value = preset.format;
+    select('resolution').value = preset.resolution;
+    input('target-size').value = preset.targetBytes == null ? '' : String(preset.targetBytes / 1_000_000);
+    const mark = preset.watermark;
+    select('watermark').value = mark.kind;
+    if (mark.kind !== 'off') {
+      customPosition = typeof mark.position === 'object' ? mark.position : null;
+      element<HTMLOptionElement>('custom-position').disabled = customPosition === null;
+      select('position').value = typeof mark.position === 'string' ? mark.position : 'custom';
+      input('opacity').value = String(mark.opacity);
+    }
+    if (mark.kind === 'text') {
+      input('text').value = mark.text;
+      input('font-size').value = String(mark.fontSize);
+      input('color').value = mark.color;
+    } else if (mark.kind === 'image') {
+      imagePath = mark.path;
+      input('image-width').value = String(mark.widthPercent);
+      message('image-name', () => fileName(mark.path));
+    }
+    select('watermark').dispatchEvent(new Event('change'));
+    dialog.close();
+    schedulePreview();
+  }
+
+  function render() {
+    list.replaceChildren();
+    if (!presets.length) {
+      const empty = document.createElement('p');
+      bindText(empty, '暂无预设。');
+      list.append(empty);
+    }
+    for (const preset of presets) {
+      const row = document.createElement('div');
+      row.className = 'library-row';
+      const summary = document.createElement('div');
+      const name = document.createElement('strong');
+      name.textContent = preset.name;
+      const detail = document.createElement('span');
+      bindText(detail, () => [
+        preset.format.toUpperCase(),
+        preset.resolution === 'original' ? t('保持原分辨率') : preset.resolution,
+        preset.targetBytes == null ? t('自动') : bytes(preset.targetBytes),
+      ].join(' · '));
+      summary.append(name, detail);
+      const actions = document.createElement('div');
+      actions.className = 'library-actions';
+      const use = document.createElement('button');
+      use.className = 'button secondary';
+      use.onclick = () => apply(preset);
+      bindText(use, '应用');
+      const remove = document.createElement('button');
+      remove.className = 'button subtle';
+      remove.onclick = () => { savePresets(presets.filter(entry => entry !== preset)); };
+      bindText(remove, '移除');
+      actions.append(use, remove);
+      row.append(summary, actions);
+      list.append(row);
+    }
+  }
+
+  button('presets-button').onclick = () => {
+    if (busy) return;
+    nameField.value = '';
+    message('preset-status');
+    render();
+    dialog.showModal();
+  };
+  element<HTMLFormElement>('preset-form').onsubmit = async event => {
+    event.preventDefault();
+    const name = nameField.value.trim();
+    const preset = presetSettings();
+    const size = preset.targetBytes;
+    const sizeError = size !== null && (!Number.isSafeInteger(size) || size < 1_000_000)
+      ? '请输入至少 1 MB 的目标大小，或留空。' : '';
+    const error = !name ? '请输入预设名称。' : sizeError || targetSizeInputError() || watermarkError(preset.watermark);
+    if (error) {
+      message('preset-status', error);
+      return;
+    }
+    if (presets.some(entry => entry.name === name)
+      && !await confirm('替换同名预设？', '保存后会覆盖该预设。', '替换')) return;
+    if (savePresets([...presets.filter(entry => entry.name !== name), { ...preset, name }])) {
+      nameField.value = '';
+      message('preset-status', '预设已保存。');
+    }
+  };
+}
+
+function installCompressionPreview() {
+  const dialog = element<HTMLDialogElement>('sample-dialog');
+  const reference = element<HTMLVideoElement>('sample-reference');
+  const compressed = element<HTMLVideoElement>('sample-compressed');
+  let resumeMain = false;
+  for (const [first, second] of [[reference, compressed], [compressed, reference]]) {
+    first.onplay = () => second.pause();
+  }
+  reference.onerror = compressed.onerror = () => {
+    if (dialog.open) message('sample-status', '此设备无法播放其中一个样片。');
+  };
+  dialog.onclose = () => {
+    const requestId = ++sampleRequest;
+    for (const video of [reference, compressed]) {
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+    }
+    void invoke('stop_compression_sample', { requestId }).catch(() => {});
+    if (resumeMain) void player.play().catch(() => {});
+  };
+  button('sample-button').onclick = async () => {
+    const current = settings();
+    if (!current || busy || !canStart || dialog.open) return;
+    const requestId = ++sampleRequest;
+    resumeMain = !player.paused;
+    player.pause();
+    element('sample-players').hidden = true;
+    message('sample-status', '正在生成压缩样片…');
+    dialog.showModal();
+    try {
+      const sample = await invoke<Sample>('compression_sample', { settings: current, requestId });
+      if (requestId !== sampleRequest || !dialog.open) return;
+      reference.src = sample.reference;
+      compressed.src = sample.compressed;
+      element('sample-players').hidden = false;
+      message('sample-status', () => t('样片取自 {start}–{end}，画质仅供参考。', {
+        start: secondsLabel(sample.start), end: secondsLabel(sample.end),
+      }));
+    } catch (reason) {
+      if (requestId === sampleRequest && dialog.open) message('sample-status', errorFrom(reason).message);
+    }
+  };
+}
+
 function showTaskDetail(detail: string, isResultPath = false) {
   message('task-detail', detail);
   const detailLine = element('task-detail');
@@ -671,7 +958,7 @@ function failed(error: AppError) {
 
 async function start() {
   const current = settings();
-  if (!current || !media || busy || !canStart) return;
+  if (!current || !media || busy || trim.active || !canStart) return;
   const source = media.path;
   const outputSize = frameSize;
   const sourceName = fileName(source);
@@ -774,15 +1061,41 @@ document.querySelectorAll<HTMLInputElement>('input[name="language"]').forEach(op
   option.onchange = () => {
     if (!option.checked) return;
     setLanguage(language);
-    syncTargetSize(false);
+    syncTargetSize();
     syncViewer();
     library.updateLanguage();
     updateWindowTitle();
   };
 });
+const trim = installTrimTimeline(player, secondsLabel, next => {
+  clips = next;
+  showStillPreview();
+  schedulePreview();
+}, () => {
+  button('trim-restore').hidden = !clips.length || trim.active;
+  setCanStart(canStart);
+});
+button('trim-restore').onclick = () => {
+  if (busy || !clips.length) return;
+  clips = [];
+  showStillPreview();
+  button('trim-button').focus();
+  schedulePreview();
+};
+button('trim-button').onclick = () => {
+  if (busy || !media?.duration) return;
+  if (trim.active) {
+    trim.close();
+    return;
+  }
+  playMedia('source', false);
+  trim.open(media.duration, clips);
+};
 translatePage();
 library.updateLanguage();
 updateWindowTitle();
+installPresets();
+installCompressionPreview();
 button('choose').onclick = button('replace').onclick = () => void chooseVideo();
 button('choose-image').onclick = () => void chooseImage();
 select('watermark').addEventListener('change', () => {
@@ -828,6 +1141,7 @@ controls.addEventListener('input', schedulePreview);
 button('play-source').onclick = () => playMedia('source');
 button('play-result').onclick = () => playMedia('result');
 button('still-preview').onclick = showStillPreview;
+button('preview-movie').onclick = playOutputPreview;
 button('start').onclick = () => void start();
 button('cancel').onclick = async () => {
   if (jobId === null) return;
