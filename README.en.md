@@ -4,6 +4,10 @@
 
 Video Trans is a desktop video converter for macOS and Windows, developed by [Bordertrail](https://github.com/Bordertrail). It processes videos on your device and comes with FFmpeg and FFprobe.
 
+![Video Trans in English, showing the video preview and output settings](docs/screenshots/video-trans-en.png)
+
+Click **中文** or **EN** in the upper-right corner to switch languages. The app remembers your choice.
+
 ## Download and install
 
 Go to [GitHub Releases](https://github.com/Bordertrail/video-trans/releases) and choose the installer under **Assets**. Check the release notes for the features available in each version.

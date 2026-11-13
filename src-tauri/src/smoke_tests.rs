@@ -31,6 +31,73 @@ fn tools() -> Tools {
 
 #[test]
 #[ignore = "requires the bundled FFmpeg, FFprobe and Chinese font"]
+fn size_limited_export_keeps_the_full_video() {
+    let tools = tools();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.mp4");
+    command(
+        &tools.ffmpeg,
+        &[
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=1280x720:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440",
+            "-t",
+            "8",
+            "-c:v",
+            "mpeg4",
+            "-q:v",
+            "2",
+            "-c:a",
+            "aac",
+            source.to_str().unwrap(),
+        ],
+    );
+    let media = inspect(&tools, &source).unwrap();
+    assert!(media.bytes > 1_000_000);
+    for format in [OutputFormat::Mp4, OutputFormat::Mov, OutputFormat::Webm] {
+        let settings = Settings {
+            media_id: 1,
+            format,
+            resolution: Resolution::P480,
+            target_bytes: Some(1_000_000),
+            watermark: Watermark::Off,
+        };
+        let output = directory
+            .path()
+            .join(format!("limited.{}", format.extension()));
+        let destination = Destination::prepare(&source, &output, format, false).unwrap();
+        let event = transcode::export(
+            &tools,
+            &media,
+            &settings,
+            destination,
+            &Control::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert!(matches!(
+            event,
+            Event::Succeeded {
+                bytes: 1..=1_000_000,
+                ..
+            }
+        ));
+        let result = inspect(&tools, &output).unwrap();
+        assert_eq!(result.display.height, 480);
+        assert!(result.audio.is_some());
+        assert!((result.duration.unwrap() - media.duration.unwrap()).abs() < 0.1);
+    }
+}
+
+#[test]
+#[ignore = "requires the bundled FFmpeg, FFprobe and Chinese font"]
 fn media_pipeline() {
     let tools = tools();
     let directory = tempfile::tempdir().unwrap();
@@ -99,6 +166,7 @@ fn media_pipeline() {
             media_id: 1,
             format,
             resolution: Resolution::P720,
+            target_bytes: None,
             watermark,
         };
         let preview =
@@ -233,6 +301,7 @@ fn media_pipeline() {
     let settings = Settings {
         media_id: 2,
         format: OutputFormat::Webm,
+        target_bytes: None,
         resolution: Resolution::P720,
         watermark: text,
     };

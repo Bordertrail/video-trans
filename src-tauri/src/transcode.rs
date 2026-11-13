@@ -1,5 +1,5 @@
 use crate::{
-    media::{AppError, AppResult, Media, Plan, Settings, Tools},
+    media::{AppError, AppResult, Media, Plan, Settings, SizeBudget, Tools},
     output::Destination,
     watermark::{self, Overlay},
 };
@@ -21,6 +21,7 @@ use tempfile::Builder;
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Event {
     Running,
+    Retrying,
     Progress { percent: Option<u8> },
     Finalizing,
     Succeeded { path: PathBuf, bytes: u64 },
@@ -294,6 +295,7 @@ pub fn export(
     send: impl Fn(Event) + Send + Clone + 'static,
 ) -> AppResult<Event> {
     let plan = Plan::new(media, settings.resolution)?;
+    let mut budget = SizeBudget::plan(media, settings)?;
     let directory = Builder::new()
         .prefix(".video-trans-")
         .tempdir_in(&destination.directory)
@@ -311,62 +313,85 @@ pub fn export(
     if let Some(mark) = &overlay {
         std::fs::write(&watermark_path, &mark.png).map_err(AppError::io)?;
     }
-    let mut command = video_command(
-        tools,
-        media,
-        None,
-        overlay.as_ref().map(|_| watermark_path.as_path()),
-    );
-    command
-        .args(["-nostats", "-progress", "pipe:1", "-filter_complex"])
-        .arg(filters(media, plan, overlay.as_ref(), false))
-        .args(["-map", "[video]"]);
-    if let Some(audio) = media.audio {
-        command.args(["-map", &format!("0:{}", audio.index)]);
-    }
-    command
-        .args(settings.format.encoding(media, plan.output))
-        .arg(&temporary);
-
+    let graph = filters(media, plan, overlay.as_ref(), false);
     let duration = media.duration;
-    let progress = send.clone();
     send(Event::Running);
-    send(Event::Progress {
-        percent: duration.map(|_| 0),
-    });
-    let result = process(
-        &mut command,
-        || control.cancelled(),
-        None,
-        move |stdout| {
-            let mut last = 0;
-            if let Some(duration) = duration {
-                for line in BufReader::new(stdout).lines() {
-                    let line = line?;
-                    if let Some(elapsed) = line
-                        .strip_prefix("out_time_us=")
-                        .and_then(|value| value.parse::<i64>().ok())
-                    {
-                        let percent = (elapsed as f64 / duration / 10_000.0).clamp(0.0, 99.0) as u8;
-                        if percent > last {
-                            last = percent;
-                            progress(Event::Progress {
-                                percent: Some(percent),
-                            });
+    for attempt in 0..3 {
+        let mut command = video_command(
+            tools,
+            media,
+            None,
+            overlay.as_ref().map(|_| watermark_path.as_path()),
+        );
+        command
+            .args(["-y", "-nostats", "-progress", "pipe:1", "-filter_complex"])
+            .arg(&graph)
+            .args(["-map", "[video]"]);
+        if let Some(audio) = media.audio {
+            command.args(["-map", &format!("0:{}", audio.index)]);
+        }
+        command
+            .args(settings.format.encoding(media, plan.output, budget))
+            .arg(&temporary);
+
+        let progress = send.clone();
+        send(Event::Progress {
+            percent: duration.map(|_| 0),
+        });
+        let result = process(
+            &mut command,
+            || control.cancelled(),
+            None,
+            move |stdout| {
+                let mut last = 0;
+                if let Some(duration) = duration {
+                    for line in BufReader::new(stdout).lines() {
+                        let line = line?;
+                        if let Some(elapsed) = line
+                            .strip_prefix("out_time_us=")
+                            .and_then(|value| value.parse::<i64>().ok())
+                        {
+                            let percent =
+                                (elapsed as f64 / duration / 10_000.0).clamp(0.0, 99.0) as u8;
+                            if percent > last {
+                                last = percent;
+                                progress(Event::Progress {
+                                    percent: Some(percent),
+                                });
+                            }
                         }
                     }
+                } else {
+                    std::io::copy(&mut BufReader::new(stdout), &mut std::io::sink())?;
                 }
-            } else {
-                std::io::copy(&mut BufReader::new(stdout), &mut std::io::sink())?;
-            }
-            Ok(Vec::new())
-        },
-    )?;
-    let Some(ProcessOutput { status, stderr, .. }) = result else {
-        return Ok(Event::Cancelled);
-    };
-    if !status.success() {
-        return Err(encoder_error(&stderr));
+                Ok(Vec::new())
+            },
+        )?;
+        let Some(ProcessOutput { status, stderr, .. }) = result else {
+            return Ok(Event::Cancelled);
+        };
+        if !status.success() {
+            return Err(encoder_error(&stderr));
+        }
+        if control.cancelled() {
+            return Ok(Event::Cancelled);
+        }
+        let (Some(limit), Some(rates)) = (settings.target_bytes, budget.as_mut()) else {
+            break;
+        };
+        let actual = temporary.metadata().map_err(AppError::io)?.len();
+        if actual <= limit {
+            break;
+        }
+        let next = (f64::from(rates.video_kbps) * limit as f64 / actual as f64 * 0.85) as u32;
+        if attempt == 2 || rates.video_kbps == SizeBudget::MIN_VIDEO_KBPS {
+            return Err(AppError::new(
+                "TargetSizeExceeded",
+                "未能将完整视频压缩到目标大小。请调高目标大小，或选择更低的分辨率。",
+            ));
+        }
+        rates.video_kbps = next.max(SizeBudget::MIN_VIDEO_KBPS);
+        send(Event::Retrying);
     }
     if !control.finalize() {
         return Ok(Event::Cancelled);

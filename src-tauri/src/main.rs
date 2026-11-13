@@ -113,6 +113,7 @@ struct ExportPlan {
     p720: bool,
     p480: bool,
     resolution_error: Option<AppError>,
+    target_size_error: Option<AppError>,
 }
 
 #[derive(Serialize)]
@@ -190,6 +191,7 @@ fn get_export_plan(settings: Settings, session: State<'_, Session>) -> AppResult
     Ok(ExportPlan {
         size,
         resolution_error,
+        target_size_error: media::SizeBudget::plan(&media, &settings).err(),
         p1080: Plan::new(&media, Resolution::P1080).is_ok(),
         p720: Plan::new(&media, Resolution::P720).is_ok(),
         p480: Plan::new(&media, Resolution::P480).is_ok(),
@@ -239,6 +241,7 @@ fn start_export(
     let session = app.state::<Session>();
     let media = session.media(settings.media_id)?;
     Plan::new(&media, settings.resolution)?;
+    media::SizeBudget::plan(&media, &settings)?;
     let destination = Destination::prepare(&media.path, &path, settings.format, overwrite)?;
 
     let id = session.next_job.fetch_add(1, Ordering::Relaxed) + 1;
@@ -563,6 +566,7 @@ fn main() {
             library::remove_workspace,
             library::workspace_videos,
             library::set_export_directory,
+            library::remove_export_history,
             library::export_directory,
             probe_video,
             get_export_plan,

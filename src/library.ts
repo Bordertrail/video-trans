@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
+import { bindText, locale, t } from './i18n';
 import { fileName } from './paths';
 import { installWorkspacePreview } from './workspace-preview';
 
@@ -21,73 +22,77 @@ type WorkspaceListing = { videos: WorkspaceVideo[]; skipped: number };
 const dialogs = `
   <dialog id="workspace-dialog" class="library-dialog workspace-dialog" aria-labelledby="workspace-title">
     <header class="library-heading">
-      <h2 id="workspace-title">工作空间</h2>
-      <form method="dialog"><button class="button subtle">关闭</button></form>
+      <h2 id="workspace-title" data-i18n>工作空间</h2>
+      <form method="dialog"><button class="button subtle" data-i18n>关闭</button></form>
     </header>
     <div class="workspace-tools">
       <label class="field">
-        文件夹
-        <select id="workspace-folder"><option value="">请选择工作空间</option></select>
+        <span data-i18n>文件夹</span>
+        <select id="workspace-folder"><option value="" data-i18n>请选择工作空间</option></select>
       </label>
       <div class="library-actions">
-        <button id="add-workspace" class="button secondary" type="button">添加文件夹</button>
-        <button id="refresh-workspace" class="button subtle" type="button" hidden>刷新</button>
-        <button id="remove-workspace" class="button subtle" type="button" hidden>移除</button>
+        <button id="add-workspace" class="button secondary" type="button" data-i18n>添加文件夹</button>
+        <button id="refresh-workspace" class="button subtle" type="button" hidden data-i18n>刷新</button>
+        <button id="remove-workspace" class="button subtle" type="button" hidden data-i18n>移除</button>
       </div>
     </div>
     <div id="workspace-filters" class="workspace-filters" hidden>
-      <label class="field">修改时间
+      <label class="field"><span data-i18n>修改时间</span>
         <select id="workspace-period">
-          <option value="all">全部时间</option><option value="7">最近 7 天</option>
-          <option value="30">最近 30 天</option><option value="90">最近 90 天</option>
-          <option value="custom">自定义日期</option>
+          <option value="all" data-i18n>全部时间</option><option value="7" data-i18n>最近 7 天</option>
+          <option value="30" data-i18n>最近 30 天</option><option value="90" data-i18n>最近 90 天</option>
+          <option value="custom" data-i18n>自定义日期</option>
         </select>
       </label>
-      <label class="field">视频类型
-        <select id="workspace-format"><option value="">全部类型</option></select>
+      <label class="field"><span data-i18n>视频类型</span>
+        <select id="workspace-format"><option value="" data-i18n>全部类型</option></select>
       </label>
-      <label class="field">分组
+      <label class="field"><span data-i18n>分组</span>
         <select id="workspace-group">
-          <option value="date">按修改日期</option><option value="format">按视频类型</option>
-          <option value="none">不分组</option>
+          <option value="date" data-i18n>按修改日期</option><option value="format" data-i18n>按视频类型</option>
+          <option value="none" data-i18n>不分组</option>
         </select>
       </label>
-      <label class="field">排序
-        <select id="workspace-sort"><option value="newest">最近修改优先</option><option value="oldest">最早修改优先</option></select>
+      <label class="field"><span data-i18n>排序</span>
+        <select id="workspace-sort"><option value="newest" data-i18n>最近修改优先</option><option value="oldest" data-i18n>最早修改优先</option></select>
       </label>
     </div>
     <div id="workspace-dates" class="split workspace-dates" hidden>
-      <label class="field">起始日期 <input id="workspace-from" type="date"></label>
-      <label class="field">结束日期 <input id="workspace-to" type="date"></label>
+      <label class="field"><span data-i18n>起始日期</span> <input id="workspace-from" type="date"></label>
+      <label class="field"><span data-i18n>结束日期</span> <input id="workspace-to" type="date"></label>
     </div>
     <p id="workspace-status" class="hint library-status" role="status"></p>
-    <div id="workspace-videos" class="library-list" aria-label="工作空间视频"></div>
+    <div id="workspace-videos" class="library-list" aria-label="工作空间视频" data-i18n-attrs></div>
   </dialog>
   <dialog id="export-directory-dialog" class="library-dialog export-directory-dialog" aria-labelledby="export-directory-title">
     <header class="library-heading">
-      <h2 id="export-directory-title">导出目录</h2>
-      <form method="dialog"><button class="button subtle">关闭</button></form>
+      <h2 id="export-directory-title" data-i18n>导出目录</h2>
+      <form method="dialog"><button class="button subtle" data-i18n>关闭</button></form>
     </header>
     <div class="directory-section">
-      <h3>默认导出目录</h3>
+      <h3 data-i18n>默认导出目录</h3>
       <p id="export-default-path"></p>
       <div class="library-actions">
-        <button id="choose-export-directory" class="button secondary" type="button">选择文件夹</button>
-        <button id="reset-export-directory" class="button subtle" type="button" hidden>使用源视频目录</button>
+        <button id="choose-export-directory" class="button secondary" type="button" data-i18n>选择文件夹</button>
+        <button id="reset-export-directory" class="button subtle" type="button" hidden data-i18n>使用源视频目录</button>
       </div>
     </div>
     <div id="temporary-directory" class="directory-section" hidden>
-      <h3>下次导出目录</h3>
+      <h3 data-i18n>下次导出目录</h3>
       <p id="temporary-directory-path"></p>
-      <button id="reset-temporary-directory" class="button subtle" type="button">取消本次选择</button>
+      <button id="reset-temporary-directory" class="button subtle" type="button" data-i18n>取消本次选择</button>
     </div>
-    <h3>历史目录</h3>
+    <h3 data-i18n>历史目录</h3>
     <p id="export-directory-status" class="hint library-status" role="status"></p>
-    <div id="export-directory-history" class="library-list" aria-label="历史导出目录"></div>
+    <div id="export-directory-history" class="library-list" aria-label="历史导出目录" data-i18n-attrs></div>
   </dialog>`;
 
 const pageSize = 100;
-const day = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
+function modifiedDate(timestamp: number | null) {
+  return timestamp === null ? t('修改日期未知') : new Intl.DateTimeFormat(locale(), {
+    year: 'numeric', month: 'long', day: 'numeric',
+  }).format(timestamp);
+}
 const get = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const select = (id: string) => get<HTMLSelectElement>(id);
 const button = (id: string) => get<HTMLButtonElement>(id);
@@ -97,15 +102,15 @@ function makeButton(label: string, style = 'secondary') {
   const control = document.createElement('button');
   control.type = 'button';
   control.className = `button ${style}`;
-  control.textContent = label;
+  bindText(control, label);
   return control;
 }
 
-function status(id: string, text: string, error = false) {
+function status(id: string, text: string | (() => string), error = false) {
   const node = get(id);
-  node.textContent = text;
+  bindText(node, text);
   node.classList.toggle('error', error);
-  node.hidden = !text;
+  node.hidden = !node.textContent;
 }
 
 export function installLibrary(
@@ -128,9 +133,10 @@ export function installLibrary(
   let scanId = 0;
   let visible = pageSize;
   let temporaryDirectory: string | null = null;
+  let editingDirectories = false;
 
   function showWorkspaces() {
-    folder.replaceChildren(new Option('请选择工作空间', ''));
+    folder.replaceChildren(new Option(t('请选择工作空间'), ''));
     for (const path of preferences.workspaces) folder.add(new Option(path, path));
     selectedWorkspace = preferences.workspaces.includes(selectedWorkspace)
       ? selectedWorkspace : preferences.workspaces[0] ?? '';
@@ -143,12 +149,13 @@ export function installLibrary(
     const preferred = preferences.defaultExportDirectory;
     const summary = get('export-directory-summary');
     summary.textContent = temporaryDirectory
-      ? `本次使用 ${fileName(temporaryDirectory)}` : preferred ? fileName(preferred) : '源视频目录';
+      ? t('本次使用 {folder}', { folder: fileName(temporaryDirectory) }) : preferred ? fileName(preferred) : t('源视频目录');
     summary.title = temporaryDirectory ?? preferred ?? '';
-    get('export-default-path').textContent = preferred ?? '源视频目录';
+    get('export-default-path').textContent = preferred ?? t('源视频目录');
     button('reset-export-directory').hidden = !preferred;
     get('temporary-directory').hidden = !temporaryDirectory;
     get('temporary-directory-path').textContent = temporaryDirectory;
+    const scroll = historyList.scrollTop;
     historyList.replaceChildren();
     for (const path of preferences.exportHistory) {
       const row = document.createElement('div');
@@ -157,20 +164,34 @@ export function installLibrary(
       label.textContent = path;
       label.title = path;
       const choose = makeButton('本次使用');
-      choose.onclick = async () => {
-        try {
-          const directory = await invoke<string>('export_directory', { path });
-          temporaryDirectory = directory;
-          showDirectoryPreferences();
-          exportDialog.close();
-        } catch (reason) {
-          status('export-directory-status', errorMessage(reason), true);
+      choose.onclick = () => void editDirectories(async () => {
+        temporaryDirectory = await invoke<string>('export_directory', { path });
+        showDirectoryPreferences();
+        exportDialog.close();
+      });
+      const remove = makeButton('移除', 'subtle');
+      remove.classList.add('remove-export-history');
+      remove.setAttribute('aria-label', t('移除历史记录：{path}', { path }));
+      remove.onclick = () => void editDirectories(async () => {
+        const index = preferences.exportHistory.indexOf(path);
+        preferences = await invoke<Preferences>('remove_export_history', { path });
+        if (temporaryDirectory === path) temporaryDirectory = null;
+        showDirectoryPreferences();
+        if (exportDialog.open) {
+          const buttons = historyList.querySelectorAll<HTMLButtonElement>('.remove-export-history');
+          const next = buttons[Math.min(index, buttons.length - 1)] ?? button('choose-export-directory');
+          next.focus({ preventScroll: true });
         }
-      };
-      row.append(label, choose);
+      });
+      const actions = document.createElement('div');
+      actions.className = 'library-actions';
+      actions.append(choose, remove);
+      row.append(label, actions);
       historyList.append(row);
     }
-    status('export-directory-status', preferences.exportHistory.length ? '' : '开始转换后，所选目录会显示在这里。');
+    historyList.scrollTop = scroll;
+    status('export-directory-status', preferences.exportHistory.length
+      ? '移除仅清除历史记录。' : '开始转换后，所选目录会显示在这里。');
   }
 
   function renderVideos() {
@@ -207,11 +228,14 @@ export function installLibrary(
         || a.relativePath.localeCompare(b.relativePath);
     });
 
-    const skipped = listing.skipped ? `，跳过 ${listing.skipped} 个无法读取的条目` : '';
-    status('workspace-status', `${videos.length ? `${videos.length} 个视频` : '没有符合条件的视频'}${skipped}`);
+    const skipped = listing.skipped;
+    status('workspace-status', () => {
+      const count = videos.length ? t('{count} 个视频', { count: videos.length }) : t('没有符合条件的视频');
+      return skipped ? count + t('，跳过 {count} 个无法读取的条目', { count: skipped }) : count;
+    });
     const groups = new Map<string, WorkspaceVideo[]>();
     for (const video of videos) {
-      const date = video.modifiedMs === null ? '修改日期未知' : day.format(video.modifiedMs);
+      const date = modifiedDate(video.modifiedMs);
       const group = groupBy === 'none' ? '' : groupBy === 'format' ? video.format.toUpperCase() : date;
       const entries = groups.get(group);
       if (entries) entries.push(video);
@@ -234,13 +258,13 @@ export function installLibrary(
         name.textContent = video.relativePath;
         name.title = video.relativePath;
         const info = document.createElement('span');
-        info.textContent = `${video.format.toUpperCase()} · ${video.modifiedMs === null ? '修改日期未知' : day.format(video.modifiedMs)}`;
+        info.textContent = `${video.format.toUpperCase()} · ${modifiedDate(video.modifiedMs)}`;
         const importVideo = () => {
           workspaceDialog.close();
           void loadVideo(video.path);
         };
         const preview = makeButton('预览', 'subtle');
-        preview.setAttribute('aria-label', `预览 ${video.relativePath}`);
+        preview.setAttribute('aria-label', t('预览 {path}', { path: video.relativePath }));
         const workspace = selectedWorkspace;
         preview.onclick = () => showPreview({
           workspace, path: video.path, name: fileName(video.relativePath),
@@ -289,7 +313,7 @@ export function installLibrary(
       if (id !== scanId) return;
       listing = current;
       const previousFormat = format.value;
-      format.replaceChildren(new Option('全部类型', ''));
+      format.replaceChildren(new Option(t('全部类型'), ''));
       for (const value of [...new Set(current.videos.map(video => video.format))].sort()) {
         format.add(new Option(value.toUpperCase(), value));
       }
@@ -326,7 +350,7 @@ export function installLibrary(
     folder.disabled = true;
     try {
       const path = add
-        ? await open({ title: '添加工作空间文件夹', directory: true, multiple: false })
+        ? await open({ title: t('添加工作空间文件夹'), directory: true, multiple: false })
         : selectedWorkspace;
       if (typeof path !== 'string' || !path) return;
       if (add) {
@@ -365,34 +389,40 @@ export function installLibrary(
   get('workspace-dates').addEventListener('change', filter);
 
   button('output-dirs').onclick = async () => {
+    if (editingDirectories) return;
     exportDialog.showModal();
-    try {
+    await editDirectories(async () => {
       await refreshPreferences();
       showDirectoryPreferences();
-    } catch (reason) {
-      status('export-directory-status', errorMessage(reason), true);
-    }
+    });
   };
 
-  async function updateDefault(selectFolder: boolean) {
-    const buttons = [button('choose-export-directory'), button('reset-export-directory')];
-    buttons.forEach(control => { control.disabled = true; });
+  async function editDirectories(edit: () => Promise<void>) {
+    if (editingDirectories) return;
+    editingDirectories = true;
     try {
-      const path = selectFolder ? await open({ title: '选择默认导出目录', directory: true, multiple: false }) : null;
+      await edit();
+    } catch (reason) {
+      status('export-directory-status', errorMessage(reason), true);
+    } finally {
+      editingDirectories = false;
+    }
+  }
+
+  function updateDefault(selectFolder: boolean) {
+    return editDirectories(async () => {
+      const path = selectFolder ? await open({ title: t('选择默认导出目录'), directory: true, multiple: false }) : null;
       if (selectFolder && typeof path !== 'string') return;
       preferences = await invoke<Preferences>('set_export_directory', { path });
       temporaryDirectory = null;
       showDirectoryPreferences();
-    } catch (reason) {
-      status('export-directory-status', errorMessage(reason), true);
-    } finally {
-      buttons.forEach(control => { control.disabled = false; });
-    }
+    });
   }
 
   button('choose-export-directory').onclick = () => void updateDefault(true);
   button('reset-export-directory').onclick = () => void updateDefault(false);
   button('reset-temporary-directory').onclick = () => {
+    if (editingDirectories) return;
     temporaryDirectory = null;
     showDirectoryPreferences();
   };
@@ -402,6 +432,13 @@ export function installLibrary(
   }
 
   return {
+    updateLanguage() {
+      showWorkspaces();
+      const allFormats = format.options[0];
+      if (allFormats?.value === '') allFormats.text = t('全部类型');
+      renderVideos();
+      showDirectoryPreferences();
+    },
     async exportDirectory(): Promise<string | null> {
       return invoke<string | null>('export_directory', { path: temporaryDirectory });
     },

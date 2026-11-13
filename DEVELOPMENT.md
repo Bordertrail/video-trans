@@ -130,6 +130,10 @@ FFmpeg 启动时传入 `-nostdin -nostats -progress pipe:1`。异步并行读取
 
 建议定义稳定的错误码，至少覆盖 `InvalidInput`、`UnsupportedVideo`、`InvalidWatermark`、`OutputConflict`、`PermissionDenied`、`DiskFull`、`EncoderFailed`、`MissingBinary`。运行时优先使用明确的文件系统错误和子进程退出结果。无法细分的编码失败显示通用提示，并保留本地诊断信息。
 
+### 5.3 目标大小
+
+「目标大小上限（MB）」可填小数，范围为 1 MB 到源文件大小，按 1 MB = 1,000,000 字节计算。留空使用自动码率。目标大小与分辨率独立设置。软件按视频时长分配音视频码率，预留封装空间。编码后检查完整文件大小，超出上限时最多再尝试两次。仍然超限时提示用户调高上限或降低分辨率，已有文件不会被覆盖。
+
 ## 6. macOS 构建与发布
 
 1. 开发机安装 Xcode 工具链、Rust stable 的 `aarch64-apple-darwin` target 和 Node.js。提交 Rust 与前端的锁文件，并记录构建使用的版本。

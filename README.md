@@ -4,6 +4,10 @@
 
 Video Trans 是一款面向 macOS 和 Windows 的本地视频转码工具，由 [Bordertrail](https://github.com/Bordertrail) 开发。视频在设备上处理，安装包已包含 FFmpeg 和 FFprobe。
 
+![视频转码简体中文界面，显示视频预览和输出设置](docs/screenshots/video-trans-zh.png)
+
+点击右上角的「中文」或「EN」即可切换界面语言。软件会记住上次选择。
+
 ## 下载安装
 
 前往 [GitHub Releases](https://github.com/Bordertrail/video-trans/releases)，在版本的 **Assets** 中选择对应的安装包。各版本包含的功能以发布说明为准。

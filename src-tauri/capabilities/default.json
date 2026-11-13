@@ -2,5 +2,14 @@
   "identifier": "main-window",
   "description": "Allow the main window to select local inputs and destinations",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-title",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "https://github.com/Bordertrail/video-trans" }]
+    }
+  ]
 }

@@ -96,7 +96,7 @@ impl OutputFormat {
         }
     }
 
-    pub fn encoding(self, media: &Media, size: Size) -> Vec<OsString> {
+    pub fn encoding(self, media: &Media, size: Size, budget: Option<SizeBudget>) -> Vec<OsString> {
         let mut args = Vec::new();
         match self {
             Self::Mp4 | Self::Mov => {
@@ -107,40 +107,103 @@ impl OutputFormat {
                     .round() as u32;
                 args.extend(h264_encoder().map(OsString::from));
                 args.extend(["-pix_fmt", "yuv420p", "-b:v"].map(OsString::from));
+                let rate = budget.map_or(rate, |budget| budget.video_kbps);
                 args.push(format!("{rate}k").into());
                 args.extend(["-movflags", "+faststart"].map(OsString::from));
             }
-            Self::Webm => args.extend(
-                [
-                    "-c:v",
-                    "libvpx-vp9",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-crf",
-                    "32",
-                    "-b:v",
-                    "0",
-                    "-deadline",
-                    "good",
-                    "-cpu-used",
-                    "4",
-                ]
-                .map(OsString::from),
-            ),
+            Self::Webm => {
+                args.extend(
+                    [
+                        "-c:v",
+                        "libvpx-vp9",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-deadline",
+                        "good",
+                        "-cpu-used",
+                        "4",
+                    ]
+                    .map(OsString::from),
+                );
+                if let Some(budget) = budget {
+                    args.extend([
+                        OsString::from("-b:v"),
+                        format!("{}k", budget.video_kbps).into(),
+                    ]);
+                } else {
+                    args.extend(["-crf", "32", "-b:v", "0"].map(OsString::from));
+                }
+            }
         }
         if let Some(audio) = media.audio {
-            let (codec, rate) = if self == Self::Webm {
-                ("libopus", "128k")
-            } else {
-                ("aac", "160k")
-            };
-            args.extend(["-c:a", codec, "-b:a", rate].map(OsString::from));
+            let codec = if self == Self::Webm { "libopus" } else { "aac" };
+            let rate = budget.map_or(self.audio_kbps(), |budget| budget.audio_kbps);
+            args.extend(["-c:a", codec, "-b:a"].map(OsString::from));
+            args.push(format!("{rate}k").into());
             if audio.channels != Some(1) {
                 args.extend(["-ac", "2"].map(OsString::from));
             }
         }
         args.extend(["-fps_mode", "passthrough", "-f", self.extension()].map(OsString::from));
         args
+    }
+
+    fn audio_kbps(self) -> u32 {
+        if self == Self::Webm {
+            128
+        } else {
+            160
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct SizeBudget {
+    pub video_kbps: u32,
+    pub audio_kbps: u32,
+}
+
+impl SizeBudget {
+    pub const MIN_VIDEO_KBPS: u32 = 32;
+    const MIN_AUDIO_KBPS: u32 = 32;
+
+    pub fn plan(media: &Media, settings: &Settings) -> AppResult<Option<Self>> {
+        let Some(limit) = settings.target_bytes else {
+            return Ok(None);
+        };
+        if !(1_000_000..=media.bytes).contains(&limit) {
+            return Err(AppError::new(
+                "InvalidTargetSize",
+                "目标大小须在 1 MB 和源文件大小之间。",
+            ));
+        }
+        let duration = media
+            .duration
+            .filter(|duration| *duration > 0.0)
+            .ok_or_else(|| {
+                AppError::new(
+                    "InvalidTargetSize",
+                    "无法读取视频时长，请清空目标大小后导出。",
+                )
+            })?;
+        // Reserve room for the container and some bitrate variation.
+        let total = ((limit as f64 * 0.95 - 16_384.0) * 8.0 / duration / 1000.0) as u32;
+        let audio = if media.audio.is_some() {
+            (total / 4).clamp(Self::MIN_AUDIO_KBPS, settings.format.audio_kbps())
+        } else {
+            0
+        };
+        let video = total.saturating_sub(audio).min(45_000);
+        if video < Self::MIN_VIDEO_KBPS {
+            return Err(AppError::new(
+                "InvalidTargetSize",
+                "目标大小对这段视频太小，请调高后再试。",
+            ));
+        }
+        Ok(Some(Self {
+            video_kbps: video,
+            audio_kbps: audio,
+        }))
     }
 }
 
@@ -227,6 +290,7 @@ pub struct Settings {
     pub media_id: u32,
     pub format: OutputFormat,
     pub resolution: Resolution,
+    pub target_bytes: Option<u64>,
     pub watermark: Watermark,
 }
 

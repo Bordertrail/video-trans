@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { bindText } from './i18n';
 
 type PreviewVideo = {
   workspace: string;
@@ -15,16 +16,16 @@ const markup = `
         <h2 id="workspace-preview-title" class="truncate"></h2>
         <p id="workspace-preview-detail"></p>
       </div>
-      <button id="workspace-preview-close" type="button" aria-label="关闭视频预览" class="button subtle" autofocus>×</button>
+      <button id="workspace-preview-close" type="button" aria-label="关闭视频预览" class="button subtle" autofocus data-i18n-attrs>×</button>
     </header>
     <div class="workspace-preview-stage">
-      <video id="workspace-preview-player" controls playsinline preload="metadata" aria-label="视频预览播放器"></video>
+      <video id="workspace-preview-player" controls playsinline preload="metadata" aria-label="视频预览播放器" data-i18n-attrs></video>
       <div id="workspace-preview-status" class="workspace-preview-status" role="status">
         <span></span>
       </div>
     </div>
     <footer class="workspace-preview-footer">
-      <button id="workspace-preview-import" type="button" class="button primary">导入视频</button>
+      <button id="workspace-preview-import" type="button" class="button primary" data-i18n>导入视频</button>
     </footer>
   </dialog>`;
 
@@ -48,7 +49,7 @@ export function installWorkspacePreview(
   let resumeMainPlayback: (() => void) | undefined;
 
   function showStatus(message: string, loading = false) {
-    statusText.textContent = message;
+    bindText(statusText, message);
     status.classList.toggle('is-loading', loading);
     status.hidden = !message;
   }

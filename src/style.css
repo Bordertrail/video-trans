@@ -32,7 +32,38 @@ button:disabled { cursor: default; opacity: .48; }
 .page-header { display: flex; gap: 15px; align-items: center; }
 .page-header h1 { font-size: 27px; letter-spacing: -.04em; margin: 0 0 5px; }
 .page-header p, .hint { color: var(--muted); font-size: 13px; margin: 0; }
-#about-button { margin-inline-start: auto; }
+.header-actions { display: flex; align-items: center; gap: 8px; margin-inline-start: auto; }
+.language-switch {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(2, 42px);
+  height: 34px;
+  padding: 3px;
+  border: 1px solid #e1def0;
+  border-radius: 9px;
+  background: #eeecf6;
+}
+.language-switch::before {
+  content: "";
+  position: absolute;
+  inset-block: 3px;
+  inset-inline-start: 3px;
+  width: 42px;
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 1px 3px #27244724;
+  transition: transform 160ms ease-out;
+}
+:root[lang="en"] .language-switch::before { transform: translateX(100%); }
+.language-switch label { position: relative; display: grid; cursor: pointer; }
+.language-switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.language-switch span { display: grid; place-items: center; border-radius: 6px; color: var(--muted); font-size: 12px; font-weight: 650; }
+.language-switch input:checked + span { color: var(--accent-dark); }
+.language-switch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (prefers-reduced-motion: reduce) {
+  .language-switch::before { transition: none; }
+}
+.page-header .app-icon { flex: none; }
 .app-icon { width: 48px; height: 48px; border-radius: 13px; background: var(--accent); display: grid; place-items: center; }
 .app-icon span { width: 24px; height: 19px; border: 2px solid #fff; border-radius: 5px; display: grid; place-items: center; }
 .app-icon span::before { content: ""; border-left: 7px solid #fff; border-top: 4px solid transparent; border-bottom: 4px solid transparent; margin-left: 1px; }
@@ -282,6 +313,16 @@ dialog p { color: var(--muted); font-size: 14px; line-height: 1.6; }
 .about-details > div + div { border-top: 1px solid var(--line); }
 .about-details dt { color: var(--muted); }
 .about-details dd { margin: 0; font-weight: 600; text-align: end; font-variant-numeric: tabular-nums; }
+.about-developer { display: flex; align-items: center; gap: 6px; }
+.about-github {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 26px;
+  border-radius: 6px;
+  color: var(--accent-dark);
+}
+.about-github:hover { background: #ebe7ff; }
 
 @media (max-width: 790px) {
   #app { padding-inline: 25px; }

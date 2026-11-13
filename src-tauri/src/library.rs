@@ -132,6 +132,11 @@ pub fn set_export_directory(
 }
 
 #[tauri::command]
+pub fn remove_export_history(path: PathBuf, library: State<'_, Library>) -> AppResult<Preferences> {
+    library.update(|preferences| preferences.export_history.retain(|entry| entry != &path))
+}
+
+#[tauri::command]
 pub fn export_directory(
     path: Option<PathBuf>,
     library: State<'_, Library>,
